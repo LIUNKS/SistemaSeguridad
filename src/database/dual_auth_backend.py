@@ -19,6 +19,34 @@ sys.path.append(os.path.join(os.path.dirname(__file__), '..', '..', 'config'))
 from database_config import get_database_config
 
 class DualAuthDatabase:
+    def get_auth_logs(self, limit=50, user_id=None, email=None):
+        """Obtener historial de autenticaciones desde la tabla auth_logs"""
+        if not self.connection:
+            self.connect()
+        try:
+            cursor = self.connection.cursor(dictionary=True)
+            query = "SELECT id, user_id, email, auth_method, status, failure_reason, ip_address, timestamp FROM auth_logs"
+            params = []
+            filters = []
+            if user_id:
+                filters.append("user_id = %s")
+                params.append(user_id)
+            if email:
+                filters.append("email = %s")
+                params.append(email)
+            if filters:
+                query += " WHERE " + " AND ".join(filters)
+            query += " ORDER BY timestamp DESC LIMIT %s"
+            params.append(limit)
+            cursor.execute(query, tuple(params))
+            logs = cursor.fetchall()
+            return logs
+        except Error as e:
+            print(f"Error al obtener historial de autenticaciones: {e}")
+            return []
+        finally:
+            if cursor:
+                cursor.close()
     """Base de datos expandida para autenticación dual"""
     
     def __init__(self):
@@ -41,7 +69,6 @@ class DualAuthDatabase:
         self.connection = None
     
     def connect(self, use_database=True):
-        """Conectar a MySQL"""
         try:
             self.connection = mysql.connector.connect(
                 host=self.host,
@@ -168,7 +195,7 @@ class DualAuthDatabase:
         return bcrypt.checkpw(password.encode('utf-8'), hashed.encode('utf-8'))
     
     def register_user(self, email: str, username: str, password: str, 
-                     first_name: str = None, last_name: str = None, phone: str = None) -> dict:
+                     first_name: str = None, last_name: str = None, phone: str = None, ip_address: str = None) -> dict:
         """Registrar nuevo usuario"""
         try:
             if not self.connection:
@@ -194,7 +221,7 @@ class DualAuthDatabase:
                                         first_name, last_name, phone))
             
             # Log del registro
-            self.log_auth_attempt(user_id, email, 'registration', 'success')
+            self.log_auth_attempt(user_id, email, 'registration', 'success', ip_address=ip_address)
             
             return {
                 "success": True, 
@@ -208,7 +235,7 @@ class DualAuthDatabase:
             if cursor:
                 cursor.close()
     
-    def authenticate_user(self, email: str, password: str) -> dict:
+    def authenticate_user(self, email: str, password: str, ip_address: str = None) -> dict:
         """Autenticar usuario con email y contraseña"""
         try:
             if not self.connection:
@@ -226,30 +253,30 @@ class DualAuthDatabase:
             user = cursor.fetchone()
             
             if not user:
-                self.log_auth_attempt(None, email, 'password', 'failed', 'User not found')
+                self.log_auth_attempt(None, email, 'password', 'failed', 'User not found', ip_address=ip_address)
                 return {"success": False, "error": "Credenciales inválidas"}
             
             # Verificar si está bloqueado
             if user['locked_until'] and datetime.now() < user['locked_until']:
-                self.log_auth_attempt(user['id'], email, 'password', 'blocked', 'Account locked')
+                self.log_auth_attempt(user['id'], email, 'password', 'blocked', 'Account locked', ip_address=ip_address)
                 return {"success": False, "error": "Cuenta temporalmente bloqueada"}
             
             # Verificar si está activo
             if not user['is_active']:
-                self.log_auth_attempt(user['id'], email, 'password', 'failed', 'Account disabled')
+                self.log_auth_attempt(user['id'], email, 'password', 'failed', 'Account disabled', ip_address=ip_address)
                 return {"success": False, "error": "Cuenta desactivada"}
             
             # Verificar contraseña
             if not self.verify_password(password, user['password_hash']):
                 # Incrementar intentos fallidos
                 self.increment_login_attempts(user['id'])
-                self.log_auth_attempt(user['id'], email, 'password', 'failed', 'Wrong password')
+                self.log_auth_attempt(user['id'], email, 'password', 'failed', 'Wrong password', ip_address=ip_address)
                 return {"success": False, "error": "Credenciales inválidas"}
             
             # Autenticación exitosa
             self.reset_login_attempts(user['id'])
             self.update_last_login(user['id'])
-            self.log_auth_attempt(user['id'], email, 'password', 'success')
+            self.log_auth_attempt(user['id'], email, 'password', 'success', ip_address=ip_address)
             
             return {
                 "success": True,
@@ -332,7 +359,7 @@ class DualAuthDatabase:
                 self.connection.rollback()
             return {"success": False, "error": f"Error inesperado: {e}"}
     
-    def authenticate_biometric(self, face_encoding: list, threshold: float = 0.6) -> dict:
+    def authenticate_biometric(self, face_encoding: list, threshold: float = 0.6, ip_address: str = None) -> dict:
         """Autenticar usuario por biometría facial"""
         try:
             if not self.connection:
@@ -399,7 +426,7 @@ class DualAuthDatabase:
                 """, (user_id,))
                 
                 self.update_last_login(user_id)
-                self.log_auth_attempt(user_id, best_match['email'], 'biometric', 'success')
+                self.log_auth_attempt(user_id, best_match['email'], 'biometric', 'success', ip_address=ip_address)
                 
                 return {
                     "success": True,
@@ -415,7 +442,7 @@ class DualAuthDatabase:
                 }
             else:
                 print(f"❌ DEBUG: Autenticación rechazada - distancia {best_distance:.4f} > umbral {threshold}")
-                self.log_auth_attempt(None, None, 'biometric', 'failed', 'No biometric match')
+                self.log_auth_attempt(None, None, 'biometric', 'failed', 'No biometric match', ip_address=ip_address)
                 return {"success": False, "error": "No se pudo verificar la identidad biométrica"}
             
         except Exception as e:
@@ -425,18 +452,16 @@ class DualAuthDatabase:
             if cursor:
                 cursor.close()
     
-    def log_auth_attempt(self, user_id: str, email: str, method: str, status: str, reason: str = None):
+    def log_auth_attempt(self, user_id: str, email: str, method: str, status: str, reason: str = None, ip_address: str = None):
         """Registrar intento de autenticación"""
         try:
             if not self.connection:
                 return
-            
             cursor = self.connection.cursor()
             cursor.execute("""
-                INSERT INTO auth_logs (user_id, email, auth_method, status, failure_reason)
-                VALUES (%s, %s, %s, %s, %s)
-            """, (user_id, email, method, status, reason))
-            
+                INSERT INTO auth_logs (user_id, email, auth_method, status, failure_reason, ip_address)
+                VALUES (%s, %s, %s, %s, %s, %s)
+            """, (user_id, email, method, status, reason, ip_address))
         except Error as e:
             print(f"Error logging auth attempt: {e}")
         finally:
