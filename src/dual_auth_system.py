@@ -1055,7 +1055,9 @@ class BiometricSetupWindow:
         self.camera_active = False
         self.registering = False
         self.face_detected = False
-        
+        # Número de muestras requeridas para registro biométrico
+        self.required_samples = 5  # Puedes ajustar este valor según lo necesario
+        self.samples_captured = 0
         self.setup_ui()
         
     def cleanup(self):
