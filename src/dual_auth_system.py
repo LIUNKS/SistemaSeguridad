@@ -13,6 +13,8 @@ import threading
 import sys
 import os
 
+import socket  # Para obtener la IP local
+
 # Añadir rutas
 sys.path.append(os.path.join(os.path.dirname(__file__), 'database'))
 sys.path.append(os.path.join(os.path.dirname(__file__), '..'))
@@ -39,16 +41,29 @@ class DualAuthSystem:
         self.login_window.root.mainloop()
     
     def authenticate_password(self, email: str, password: str) -> dict:
-        """Autenticar con email y contraseña"""
-        return self.db.authenticate_user(email, password)
+        """Autenticar con email y contraseña, registrando IP local"""
+        ip_address = self.get_local_ip()
+        return self.db.authenticate_user(email, password, ip_address=ip_address)
     
     def authenticate_biometric(self, face_encoding: list) -> dict:
-        """Autenticar con biometría"""
-        return self.db.authenticate_biometric(face_encoding)
+        """Autenticar con biometría, registrando IP local"""
+        ip_address = self.get_local_ip()
+        return self.db.authenticate_biometric(face_encoding, ip_address=ip_address)
     
     def register_user(self, user_data: dict) -> dict:
-        """Registrar nuevo usuario"""
-        return self.db.register_user(**user_data)
+        """Registrar nuevo usuario, registrando IP local"""
+        ip_address = self.get_local_ip()
+        return self.db.register_user(**user_data, ip_address=ip_address)
+    def get_local_ip(self):
+        """Obtener la IP local de la máquina"""
+        try:
+            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            s.connect(("8.8.8.8", 80))
+            ip = s.getsockname()[0]
+            s.close()
+            return ip
+        except Exception:
+            return "127.0.0.1"
     
     def register_face_biometric(self, user_id: str, face_encoding: list) -> dict:
         """Registrar biometría facial"""
@@ -914,19 +929,41 @@ class MainApplication:
         """Crear tab de historial"""
         history_frame = ttk.Frame(notebook, padding="20")
         notebook.add(history_frame, text="📊 Historial")
-        
+
         ttk.Label(
             history_frame,
             text="Historial de Sesiones",
             font=('Arial', 16, 'bold')
         ).pack(pady=(0, 20))
-        
-        ttk.Label(
-            history_frame,
-            text="Aquí se mostraría el historial de inicios de sesión...",
-            font=('Arial', 11),
-            foreground='#7f8c8d'
-        ).pack()
+
+        # Obtener historial del usuario
+        logs = self.auth_system.db.get_auth_logs(user_id=self.user['id'], limit=50)
+
+        columns = ("timestamp", "auth_method", "status", "failure_reason", "ip_address")
+        tree = ttk.Treeview(history_frame, columns=columns, show="headings", height=15)
+        tree.heading("timestamp", text="Fecha/Hora")
+        tree.heading("auth_method", text="Método")
+        tree.heading("status", text="Estado")
+        tree.heading("failure_reason", text="Motivo (si falla)")
+        tree.heading("ip_address", text="IP")
+
+        for log in logs:
+            tree.insert("", "end", values=(
+                log.get("timestamp", ""),
+                log.get("auth_method", ""),
+                log.get("status", ""),
+                log.get("failure_reason", ""),
+                log.get("ip_address", "")
+            ))
+        tree.pack(fill=tk.BOTH, expand=True)
+
+        if not logs:
+            ttk.Label(
+                history_frame,
+                text="No hay historial de autenticaciones para este usuario.",
+                font=('Arial', 11),
+                foreground='#7f8c8d'
+            ).pack(pady=10)
     
     def setup_new_biometric(self):
         """Configurar nueva biometría"""
